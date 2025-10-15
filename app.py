@@ -11,10 +11,14 @@ from typing import List
 # ==============================
 try:
     import pinecone
-    st.success("✅ Pinecone package detected")
+    if hasattr(pinecone, 'Pinecone'):
+        st.success("✅ Correct Pinecone package detected")
+    else:
+        st.error("❌ Wrong Pinecone package. Please install 'pinecone' not 'pinecone-client'")
+        st.stop()
 except ImportError as e:
     st.error(f"❌ Pinecone import error: {e}")
-    st.info("Please install with: pip install pinecone-client")
+    st.info("Please install with: pip install pinecone")
     st.stop()
 
 try:
@@ -50,12 +54,19 @@ def get_available_models(groq_client):
         return available_models or CHAT_MODELS
     except Exception:
         return CHAT_MODELS
-
 def check_environment():
-    pinecone_key = os.getenv("PINECONE_API_KEY") or st.secrets.get("PINECONE_API_KEY")
-    groq_key = os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY")
+    try:
+        # Try to get from secrets first
+        pinecone_key = st.secrets.get("PINECONE_API_KEY")
+        groq_key = st.secrets.get("GROQ_API_KEY")
+    except (FileNotFoundError, st.errors.StreamlitSecretNotFoundError):
+        # Fall back to environment variables if secrets file doesn't exist
+        pinecone_key = os.getenv("PINECONE_API_KEY")
+        groq_key = os.getenv("GROQ_API_KEY")
+    
     if not pinecone_key or not groq_key:
         st.error("❌ Missing Pinecone or Groq API key")
+        st.info("Please set your API keys in environment variables or create a secrets.toml file")
         return None, None
     return pinecone_key, groq_key
 
@@ -428,4 +439,4 @@ def main():
         st.sidebar.write(f"**Total vectors:** {total_vectors}")
 
 if __name__ == "__main__":
-    main()
+    main()   
