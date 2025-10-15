@@ -6,9 +6,18 @@ import uuid
 import time
 from typing import List
 
-# ==============================
-# Package imports and checks
-# ==============================
+# Add environment variable fallback
+def check_environment():
+    # Priority: Streamlit secrets > Environment variables
+    pinecone_key = st.secrets.get("PINECONE_API_KEY") or os.getenv("PINECONE_API_KEY")
+    groq_key = st.secrets.get("GROQ_API_KEY") or os.getenv("GROQ_API_KEY")
+    
+    if not pinecone_key:
+        st.error("❌ Missing Pinecone API key. Please add PINECONE_API_KEY to your secrets.")
+    if not groq_key:
+        st.error("❌ Missing Groq API key. Please add GROQ_API_KEY to your secrets.")
+    
+    return pinecone_key, groq_key
 try:
     import pinecone
     if hasattr(pinecone, 'Pinecone'):
@@ -54,19 +63,12 @@ def get_available_models(groq_client):
         return available_models or CHAT_MODELS
     except Exception:
         return CHAT_MODELS
+
 def check_environment():
-    try:
-        # Try to get from secrets first
-        pinecone_key = st.secrets.get("PINECONE_API_KEY")
-        groq_key = st.secrets.get("GROQ_API_KEY")
-    except (FileNotFoundError, st.errors.StreamlitSecretNotFoundError):
-        # Fall back to environment variables if secrets file doesn't exist
-        pinecone_key = os.getenv("PINECONE_API_KEY")
-        groq_key = os.getenv("GROQ_API_KEY")
-    
+    pinecone_key = os.getenv("PINECONE_API_KEY") or st.secrets.get("PINECONE_API_KEY")
+    groq_key = os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY")
     if not pinecone_key or not groq_key:
         st.error("❌ Missing Pinecone or Groq API key")
-        st.info("Please set your API keys in environment variables or create a secrets.toml file")
         return None, None
     return pinecone_key, groq_key
 
