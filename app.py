@@ -91,7 +91,6 @@ def get_available_models(groq_client):
 @st.cache_resource
 def load_embedding_model():
     try:
-        # Use a smaller model for Streamlit Cloud compatibility
         return SentenceTransformer('all-MiniLM-L6-v2')
     except Exception as e:
         st.error(f"Failed to load embedding model: {e}")
@@ -109,13 +108,10 @@ def initialize_clients(pinecone_key, groq_key):
 def get_pinecone_index(pc):
     try:
         index_name = "rag-chatbot-index"
-        existing_indexes = pc.list_indexes()
         
-        # Handle different response formats from Pinecone client
-        if hasattr(existing_indexes, 'indexes'):
-            index_names = [index.name for index in existing_indexes.indexes]
-        else:
-            index_names = existing_indexes.names()
+        # Check if index exists
+        existing_indexes = pc.list_indexes()
+        index_names = [index.name for index in existing_indexes]
         
         if index_name not in index_names:
             pc.create_index(
@@ -216,7 +212,7 @@ Answer:"""
         )
         return resp.choices[0].message.content
     except Exception as e:
-        return f"Error: {e}"
+        return f"Error generating response: {e}"
 
 def save_uploaded_files(data):
     try:
@@ -235,7 +231,8 @@ def load_uploaded_files():
     return {}
 
 def clear_chat():
-    st.session_state.messages = []
+    if "messages" in st.session_state:
+        st.session_state.messages = []
 
 # ==============================
 # Main App
@@ -250,12 +247,15 @@ def main():
     st.title("📚 RAG Chatbot with Pinecone & Groq")
     
     # Initialize session state
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-    if "uploaded_files" not in st.session_state:
-        st.session_state.uploaded_files = load_uploaded_files()
-    if "selected_namespace" not in st.session_state:
-        st.session_state.selected_namespace = None
+    session_defaults = {
+        "messages": [],
+        "uploaded_files": load_uploaded_files(),
+        "selected_namespace": None
+    }
+    
+    for key, value in session_defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
 
     # Check packages
     if not PACKAGES_AVAILABLE:
@@ -293,7 +293,8 @@ def main():
     try:
         stats = index.describe_index_stats()
         namespaces = list(stats.namespaces.keys())
-    except:
+    except Exception as e:
+        st.sidebar.warning(f"Could not load namespaces: {e}")
         namespaces = []
 
     # Namespace selection
@@ -328,6 +329,8 @@ def main():
                         save_uploaded_files(st.session_state.uploaded_files)
                     else:
                         st.error("Failed to process document")
+                else:
+                    st.error("No text content found in document")
                 
                 # Cleanup
                 os.unlink(tmp_path)
@@ -365,8 +368,11 @@ def main():
 
     # Display uploaded files
     st.sidebar.header("📁 Your Files")
-    for filename, ns in st.session_state.uploaded_files.items():
-        st.sidebar.write(f"• {filename} → {ns}")
+    if st.session_state.uploaded_files:
+        for filename, ns in st.session_state.uploaded_files.items():
+            st.sidebar.write(f"• {filename} → {ns}")
+    else:
+        st.sidebar.write("No files uploaded yet")
 
 if __name__ == "__main__":
     main()
