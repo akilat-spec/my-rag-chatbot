@@ -12,3 +12,4 @@ torch>=2.2.0
 transformers>=4.35.0
 tiktoken>=0.5.1
 numpy>=1.24.3
+pinecone-client>=3.0.0
