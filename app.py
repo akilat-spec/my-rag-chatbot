@@ -16,7 +16,7 @@ try:
     from langchain_text_splitters import RecursiveCharacterTextSplitter
     from langchain_community.document_loaders import PyPDFLoader
     from sentence_transformers import SentenceTransformer
-    from langchain.schema import Document
+    from langchain_core.documents import Document  # Updated import
 except ImportError as e:
     st.error(f"❌ Missing required package: {e}")
     PACKAGES_AVAILABLE = False
@@ -40,7 +40,7 @@ def get_available_models(groq_client):
     try:
         models = groq_client.models.list()
         available_models = [m.id for m in models.data if m.id in CHAT_MODELS]
-        return available_models or CHAT_MODELS
+        return available_available_models or CHAT_MODELS
     except Exception:
         return CHAT_MODELS
 
@@ -180,7 +180,7 @@ def main():
     # Check package availability first
     if not PACKAGES_AVAILABLE:
         st.error("Missing required packages. Please install the packages from requirements.txt")
-        st.info("Required packages: pinecone, groq, langchain, langchain-community, langchain-text-splitters, sentence-transformers, pypdf")
+        st.info("Required packages: pinecone, groq, langchain, langchain-community, langchain-text-splitters, langchain-core, sentence-transformers, pypdf")
         return
 
     # Initialize session_state
