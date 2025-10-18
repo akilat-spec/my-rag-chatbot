@@ -6,37 +6,17 @@ import uuid
 import time
 from typing import List
 
-# Add environment variable fallback
-def check_environment():
-    # Priority: Streamlit secrets > Environment variables
-    pinecone_key = st.secrets.get("PINECONE_API_KEY") or os.getenv("PINECONE_API_KEY")
-    groq_key = st.secrets.get("GROQ_API_KEY") or os.getenv("GROQ_API_KEY")
-    
-    if not pinecone_key:
-        st.error("❌ Missing Pinecone API key. Please add PINECONE_API_KEY to your secrets.")
-    if not groq_key:
-        st.error("❌ Missing Groq API key. Please add GROQ_API_KEY to your secrets.")
-    
-    return pinecone_key, groq_key
+# ==============================
+# Package Availability Check
+# ==============================
+PACKAGES_AVAILABLE = True
 try:
     import pinecone
-    if hasattr(pinecone, 'Pinecone'):
-        st.success("✅ Correct Pinecone package detected")
-    else:
-        st.error("❌ Wrong Pinecone package. Please install 'pinecone' not 'pinecone-client'")
-        st.stop()
-except ImportError as e:
-    st.error(f"❌ Pinecone import error: {e}")
-    st.info("Please install with: pip install pinecone")
-    st.stop()
-
-try:
     from groq import Groq
-    from langchain.text_splitter import RecursiveCharacterTextSplitter
+    from langchain_text_splitters import RecursiveCharacterTextSplitter  # Updated import
     from langchain_community.document_loaders import PyPDFLoader
     from sentence_transformers import SentenceTransformer
-    from langchain.schema import Document
-    PACKAGES_AVAILABLE = True
+    from langchain.schema import Document  # Added Document import
 except ImportError as e:
     st.error(f"❌ Missing required package: {e}")
     PACKAGES_AVAILABLE = False
@@ -46,7 +26,7 @@ except ImportError as e:
 # ==============================
 CHAT_MODELS = [
     "llama-3.1-8b-instant",
-    "llama-3.1-70b-versatile",
+    "llama-3.1-70b-versatile", 
     "llama-3.1-405b-reasoning",
     "mixtral-8x7b-32768",
     "gemma2-9b-it"
@@ -65,11 +45,15 @@ def get_available_models(groq_client):
         return CHAT_MODELS
 
 def check_environment():
-    pinecone_key = os.getenv("PINECONE_API_KEY") or st.secrets.get("PINECONE_API_KEY")
-    groq_key = os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY")
-    if not pinecone_key or not groq_key:
-        st.error("❌ Missing Pinecone or Groq API key")
-        return None, None
+    # Priority: Streamlit secrets > Environment variables
+    pinecone_key = st.secrets.get("PINECONE_API_KEY") or os.getenv("PINECONE_API_KEY")
+    groq_key = st.secrets.get("GROQ_API_KEY") or os.getenv("GROQ_API_KEY")
+    
+    if not pinecone_key:
+        st.error("❌ Missing Pinecone API key. Please add PINECONE_API_KEY to your secrets.")
+    if not groq_key:
+        st.error("❌ Missing Groq API key. Please add GROQ_API_KEY to your secrets.")
+    
     return pinecone_key, groq_key
 
 @st.cache_resource
@@ -77,22 +61,44 @@ def load_embedding_model():
     return SentenceTransformer('all-MiniLM-L6-v2')
 
 def initialize_clients(pinecone_key, groq_key):
-    pc = pinecone.Pinecone(api_key=pinecone_key)
+    # Check if we're using the new Pinecone SDK (v3+)
+    if hasattr(pinecone, 'Pinecone'):
+        pc = pinecone.Pinecone(api_key=pinecone_key)
+    else:
+        # Fallback for older versions
+        pc = pinecone.init(api_key=pinecone_key)
+    
     groq_client = Groq(api_key=groq_key)
     return pc, groq_client
 
 def get_pinecone_index(pc):
     index_name = "rag-chatbot-index"
-    existing = pc.list_indexes().names()
+    
+    # Check if we're using new SDK structure
+    if hasattr(pc, 'list_indexes'):
+        existing = pc.list_indexes().names()
+    else:
+        # Fallback for older versions
+        existing = pinecone.list_indexes()
+    
     if index_name not in existing:
-        pc.create_index(
-            name=index_name,
-            dimension=384,
-            metric="cosine",
-            spec=pinecone.ServerlessSpec(cloud="aws", region="us-east-1")
-        )
+        if hasattr(pc, 'create_index'):
+            pc.create_index(
+                name=index_name,
+                dimension=384,
+                metric="cosine",
+                spec=pinecone.ServerlessSpec(cloud="aws", region="us-east-1")
+            )
+        else:
+            # Fallback for older versions
+            pinecone.create_index(
+                name=index_name,
+                dimension=384,
+                metric="cosine"
+            )
         time.sleep(10)
-    return pc.Index(index_name)
+    
+    return pc.Index(index_name) if hasattr(pc, 'Index') else pinecone.Index(index_name)
 
 def process_document(file_path, file_type):
     if file_type == "pdf":
@@ -102,6 +108,7 @@ def process_document(file_path, file_type):
         with open(file_path, 'r', encoding='utf-8') as f:
             text = f.read()
         docs = [Document(page_content=text)]
+    
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     chunks = splitter.split_documents(docs)
     return [c.page_content for c in chunks]
@@ -112,6 +119,7 @@ def store_embeddings(index, model, texts, namespace, update_existing=False):
             index.delete(delete_all=True, namespace=namespace)
         except Exception:
             pass
+    
     embeddings = model.encode(texts).tolist()
     vectors = [{"id": f"doc_{uuid.uuid4().hex[:8]}", "values": emb, "metadata": {"text": t}} for emb, t in zip(embeddings, texts)]
     index.upsert(vectors=vectors, namespace=namespace)
@@ -163,6 +171,11 @@ def main():
     st.set_page_config(page_title="RAG Chatbot", layout="wide")
     st.title("📚 Multi-Level Namespace Chatbot")
 
+    # Check package availability first
+    if not PACKAGES_AVAILABLE:
+        st.error("Missing required packages. Please install: pip install langchain-text-splitters langchain-community")
+        return
+
     # Initialize session_state
     if "messages" not in st.session_state:
         st.session_state.messages = []
@@ -179,14 +192,12 @@ def main():
     if "search_mode" not in st.session_state:
         st.session_state.search_mode = "subnamespace"
 
-    if not PACKAGES_AVAILABLE:
-        st.error("Missing required packages.")
-        return
-
+    # Check environment variables
     pinecone_key, groq_key = check_environment()
     if not pinecone_key or not groq_key:
         return
 
+    # Initialize clients
     embedding_model = load_embedding_model()
     pc, groq_client = initialize_clients(pinecone_key, groq_key)
     index = get_pinecone_index(pc)
@@ -200,8 +211,12 @@ def main():
     st.sidebar.header("📂 Namespace Management")
 
     # Get all namespaces
-    current_stats = index.describe_index_stats().get("namespaces", {})
-    all_namespaces = list(current_stats.keys())
+    try:
+        current_stats = index.describe_index_stats().get("namespaces", {})
+        all_namespaces = list(current_stats.keys())
+    except Exception as e:
+        st.error(f"Error connecting to Pinecone index: {e}")
+        return
 
     # Parent namespaces
     parent_namespaces = sorted(list({ns.split("__")[0] for ns in all_namespaces if "__" in ns}))
@@ -249,14 +264,11 @@ def main():
         sub_options = ["Create New Subnamespace"] + subnamespaces
     
     # Handle subnamespace selection persistence
-    # If current selection is not in options, find the best alternative
     if st.session_state.selected_subnamespace not in sub_options:
         if subnamespaces:
-            # If we have subnamespaces, default to search all
             st.session_state.selected_subnamespace = "Search All Documents in Parent"
             st.session_state.search_mode = "parent"
         else:
-            # If no subnamespaces, default to create new
             st.session_state.selected_subnamespace = "Create New Subnamespace"
             st.session_state.search_mode = "subnamespace"
 
@@ -441,4 +453,4 @@ def main():
         st.sidebar.write(f"**Total vectors:** {total_vectors}")
 
 if __name__ == "__main__":
-    main()   
+    main()
