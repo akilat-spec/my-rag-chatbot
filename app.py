@@ -16,14 +16,19 @@ st.set_page_config(page_title="RAG Chatbot", layout="wide")
 # ==============================
 try:
     import pinecone
+    # Check if we have the correct Pinecone package
     if hasattr(pinecone, 'Pinecone'):
         st.success("✅ Correct Pinecone package detected")
     else:
-        st.error("❌ Wrong Pinecone package. Please install 'pinecone-client' not 'pinecone-client'")
+        st.error("❌ Wrong Pinecone package detected")
         st.stop()
 except ImportError as e:
     st.error(f"❌ Pinecone import error: {e}")
-    st.info("Please install with: pip install pinecone-client")
+    st.info("Please install with: pip install pinecone")
+    st.stop()
+except Exception as e:
+    st.error(f"❌ Pinecone initialization error: {e}")
+    st.info("You may have the wrong package. Please ensure you're using 'pinecone' not 'pinecone-client'")
     st.stop()
 
 try:
@@ -67,9 +72,11 @@ def check_environment():
     
     if not pinecone_key:
         st.error("❌ Missing Pinecone API key in secrets")
+        st.info("Please add PINECONE_API_KEY to your Streamlit secrets")
         return None, None
     if not groq_key:
         st.error("❌ Missing Groq API key in secrets")
+        st.info("Please add GROQ_API_KEY to your Streamlit secrets")
         return None, None
     return pinecone_key, groq_key
 
@@ -78,69 +85,109 @@ def load_embedding_model():
     return SentenceTransformer('all-MiniLM-L6-v2')
 
 def initialize_clients(pinecone_key, groq_key):
-    pc = pinecone.Pinecone(api_key=pinecone_key)
-    groq_client = Groq(api_key=groq_key)
-    return pc, groq_client
+    try:
+        pc = pinecone.Pinecone(api_key=pinecone_key)
+        groq_client = Groq(api_key=groq_key)
+        return pc, groq_client
+    except Exception as e:
+        st.error(f"❌ Error initializing clients: {e}")
+        st.stop()
 
 def get_pinecone_index(pc):
     index_name = "rag-chatbot-index"
-    existing = pc.list_indexes().names()
-    if index_name not in existing:
-        pc.create_index(
-            name=index_name,
-            dimension=384,
-            metric="cosine",
-            spec=pinecone.ServerlessSpec(cloud="aws", region="us-east-1")
-        )
-        # Wait for index to be ready
-        for i in range(30):
-            try:
-                index = pc.Index(index_name)
-                index.describe_index_stats()
-                break
-            except Exception:
-                if i == 29:
-                    st.error("❌ Timeout waiting for index to be ready")
-                    st.stop()
-                time.sleep(1)
-    return pc.Index(index_name)
+    try:
+        existing_indexes = pc.list_indexes()
+        existing_names = [index.name for index in existing_indexes] if hasattr(existing_indexes[0], 'name') else existing_indexes.names()
+        
+        if index_name not in existing_names:
+            st.info(f"Creating new Pinecone index: {index_name}")
+            pc.create_index(
+                name=index_name,
+                dimension=384,
+                metric="cosine",
+                spec=pinecone.ServerlessSpec(cloud="aws", region="us-east-1")
+            )
+            # Wait for index to be ready
+            for i in range(30):
+                try:
+                    index = pc.Index(index_name)
+                    index.describe_index_stats()
+                    st.success("✅ Index created successfully")
+                    break
+                except Exception:
+                    if i == 29:
+                        st.error("❌ Timeout waiting for index to be ready")
+                        st.stop()
+                    time.sleep(1)
+        return pc.Index(index_name)
+    except Exception as e:
+        st.error(f"❌ Error creating/getting Pinecone index: {e}")
+        st.stop()
 
 def process_document(file_path, file_type):
-    if file_type == "pdf":
-        loader = PyPDFLoader(file_path)
-        docs = loader.load()
-    else:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            text = f.read()
-        docs = [Document(page_content=text)]
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    chunks = splitter.split_documents(docs)
-    return [c.page_content for c in chunks]
+    try:
+        if file_type == "pdf":
+            loader = PyPDFLoader(file_path)
+            docs = loader.load()
+        else:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                text = f.read()
+            docs = [Document(page_content=text)]
+        splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+        chunks = splitter.split_documents(docs)
+        return [c.page_content for c in chunks]
+    except Exception as e:
+        st.error(f"❌ Error processing document: {e}")
+        return []
 
 def store_embeddings(index, model, texts, namespace, update_existing=False):
-    if update_existing:
-        try:
-            index.delete(delete_all=True, namespace=namespace)
-        except Exception:
-            pass
-    embeddings = model.encode(texts).tolist()
-    vectors = [{"id": f"doc_{uuid.uuid4().hex[:8]}", "values": emb, "metadata": {"text": t}} for emb, t in zip(embeddings, texts)]
-    
-    # Upsert in batches to avoid payload size limits
-    batch_size = 100
-    for i in range(0, len(vectors), batch_size):
-        batch = vectors[i:i + batch_size]
-        index.upsert(vectors=batch, namespace=namespace)
-    
-    return len(vectors)
+    if not texts:
+        st.warning("No text chunks to process")
+        return 0
+        
+    try:
+        if update_existing:
+            try:
+                index.delete(delete_all=True, namespace=namespace)
+                st.info(f"Deleted existing vectors in namespace: {namespace}")
+            except Exception as e:
+                st.warning(f"Could not delete existing vectors: {e}")
+        
+        embeddings = model.encode(texts).tolist()
+        vectors = []
+        for i, (emb, text) in enumerate(zip(embeddings, texts)):
+            vectors.append({
+                "id": f"doc_{namespace}_{uuid.uuid4().hex[:8]}_{i}",
+                "values": emb,
+                "metadata": {"text": text}
+            })
+        
+        # Upsert in batches to avoid size limits
+        batch_size = 100
+        for i in range(0, len(vectors), batch_size):
+            batch = vectors[i:i + batch_size]
+            index.upsert(vectors=batch, namespace=namespace)
+        
+        return len(vectors)
+    except Exception as e:
+        st.error(f"❌ Error storing embeddings: {e}")
+        return 0
 
 def search_documents(index, model, query, namespace):
-    q_emb = model.encode([query]).tolist()[0]
-    res = index.query(vector=q_emb, top_k=5, include_metadata=True, namespace=namespace)
-    return [{"text": m.metadata.get("text", ""), "score": m.score} for m in res.matches if m.score > 0.3]
+    try:
+        q_emb = model.encode([query]).tolist()[0]
+        res = index.query(vector=q_emb, top_k=5, include_metadata=True, namespace=namespace)
+        return [{"text": m.metadata.get("text", ""), "score": m.score} for m in res.matches if m.score > 0.3]
+    except Exception as e:
+        st.error(f"❌ Error searching documents: {e}")
+        return []
 
 def generate_response(client, context, question, model):
-    prompt = f"""Based on the following context, please answer the question. If the context doesn't contain relevant information, say so.
+    try:
+        if not context.strip():
+            return "I couldn't find relevant information in the documents to answer your question."
+            
+        prompt = f"""Based on the following context, please answer the question. If the context doesn't contain relevant information, say so.
 
 Context:
 {context}
@@ -148,17 +195,19 @@ Context:
 Question: {question}
 
 Answer:"""
-    
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": "You are a helpful assistant that answers questions based on the provided context."},
-            {"role": "user", "content": prompt}
-        ],
-        max_tokens=500,
-        temperature=0.1
-    )
-    return resp.choices[0].message.content
+        
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant that answers questions based on the provided context."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=500,
+            temperature=0.1
+        )
+        return resp.choices[0].message.content
+    except Exception as e:
+        return f"Error generating response: {str(e)}"
 
 def save_uploaded_files(data):
     try:
@@ -345,7 +394,8 @@ def main():
                     clear_chat()
                 else:
                     st.error("❌ No text could be extracted from the document")
-            os.unlink(tmp_path)
+            if tmp_path and os.path.exists(tmp_path):
+                os.unlink(tmp_path)
             st.rerun()
 
     # Update existing subnamespace
@@ -362,7 +412,8 @@ def main():
                     clear_chat()
                 else:
                     st.error("❌ No text could be extracted from the document")
-            os.unlink(tmp_path)
+            if tmp_path and os.path.exists(tmp_path):
+                os.unlink(tmp_path)
             st.rerun()
 
     # Delete subnamespace
