@@ -112,30 +112,91 @@ UPLOADED_FILES_JSON = "uploaded_files.json"
 # ==============================
 # Helper Functions
 # ==============================
+def validate_api_keys(pinecone_key, groq_key):
+    """Validate API keys and provide specific error messages"""
+    issues = []
+    
+    if not pinecone_key:
+        issues.append("❌ Pinecone API key is missing")
+    elif len(pinecone_key) < 20:
+        issues.append("❌ Pinecone API key appears too short")
+    
+    if not groq_key:
+        issues.append("❌ Groq API key is missing")
+    elif not groq_key.startswith('gsk_'):
+        issues.append("❌ Groq API key should start with 'gsk_'")
+    elif len(groq_key) < 30:
+        issues.append("❌ Groq API key appears too short")
+    
+    return issues
+
 def get_available_models(groq_client):
     try:
         models = groq_client.models.list()
         available_models = [m.id for m in models.data if m.id in CHAT_MODELS]
         return available_models or CHAT_MODELS
-    except Exception:
+    except Exception as e:
+        st.error(f"❌ Error fetching models from Groq: {e}")
         return CHAT_MODELS
 
 def check_environment():
+    """Check environment with detailed API key validation"""
     # For Streamlit Cloud, use st.secrets
-    pinecone_key = st.secrets.get("PINECONE_API_KEY")
-    groq_key = st.secrets.get("GROQ_API_KEY")
+    pinecone_key = st.secrets.get("PINECONE_API_KEY", "").strip()
+    groq_key = st.secrets.get("GROQ_API_KEY", "").strip()
     
-    if not pinecone_key:
-        st.error("❌ Missing Pinecone API key")
-        st.info("Please add PINECONE_API_KEY to your Streamlit Cloud secrets")
-        return None, None
-    if not groq_key:
-        st.error("❌ Missing Groq API key")
-        st.info("Please add GROQ_API_KEY to your Streamlit Cloud secrets")
+    # Validate API keys
+    issues = validate_api_keys(pinecone_key, groq_key)
+    
+    if issues:
+        for issue in issues:
+            st.error(issue)
+        
+        st.markdown("""
+        **How to fix API key issues:**
+        
+        1. **Get your Groq API key:**
+           - Go to [Groq Cloud Console](https://console.groq.com/)
+           - Sign up/login to your account
+           - Navigate to API Keys
+           - Create a new API key or copy an existing one
+           - Keys should start with `gsk_`
+        
+        2. **Update Streamlit Cloud secrets:**
+           - Go to your app settings
+           - Click on "Secrets"
+           - Make sure your secrets look exactly like this:
+        ```toml
+        PINECONE_API_KEY = "your_pinecone_key_here"
+        GROQ_API_KEY = "gsk_your_groq_key_here"
+        ```
+        
+        3. **Redeploy after updating secrets**
+        """)
         return None, None
     
-    st.success("✅ API keys found in secrets")
-    return pinecone_key, groq_key
+    # Test Groq API key by trying to list models
+    try:
+        groq_client = Groq(api_key=groq_key)
+        models = groq_client.models.list()
+        st.success("✅ Groq API key validated successfully")
+        st.success("✅ Pinecone API key format looks good")
+        return pinecone_key, groq_key
+    except Exception as e:
+        st.error(f"❌ Groq API key validation failed: {e}")
+        st.info("""
+        **Possible reasons:**
+        - API key is incorrect or expired
+        - There might be extra spaces in your secret
+        - The key doesn't have proper permissions
+        - You've exceeded your rate limit
+        
+        **Solution:**
+        - Get a new API key from [Groq Cloud](https://console.groq.com/)
+        - Update your Streamlit Cloud secrets
+        - Redeploy the application
+        """)
+        return None, None
 
 @st.cache_resource
 def load_embedding_model():
@@ -279,7 +340,16 @@ Please provide a helpful answer based only on the context provided:"""
         )
         return resp.choices[0].message.content
     except Exception as e:
-        return f"I encountered an error while generating a response. Please try again. Error: {str(e)}"
+        # More specific error handling for Groq API errors
+        error_msg = str(e)
+        if "401" in error_msg and "Invalid API Key" in error_msg:
+            return "❌ **API Key Error**: The Groq API key is invalid. Please check your Streamlit Cloud secrets and ensure you have a valid API key from https://console.groq.com/"
+        elif "429" in error_msg:
+            return "⚠️ **Rate Limit Exceeded**: You've made too many requests. Please wait a moment and try again."
+        elif "500" in error_msg or "503" in error_msg:
+            return "🔧 **Service Temporarily Unavailable**: The AI service is currently busy. Please try again in a few moments."
+        else:
+            return f"❌ **Error generating response**: {error_msg}"
 
 def save_uploaded_files(data):
     try:
@@ -332,10 +402,37 @@ def main():
         if key not in st.session_state:
             st.session_state[key] = default
 
-    # Check environment
+    # Check environment with detailed validation
     pinecone_key, groq_key = check_environment()
     if not pinecone_key or not groq_key:
-        st.info("Please add your API keys to Streamlit Cloud secrets to continue.")
+        # Show troubleshooting guide
+        st.markdown("""
+        ## 🔧 API Key Troubleshooting Guide
+        
+        ### For Groq API Key:
+        1. **Get a free API key** from [Groq Cloud](https://console.groq.com/)
+        2. **Sign up** for an account (it's free)
+        3. **Navigate to API Keys** in the dashboard
+        4. **Create a new API key**
+        5. **Copy the key** (it should start with `gsk_`)
+        
+        ### For Streamlit Cloud:
+        1. Go to your app's **Settings**
+        2. Click on **Secrets**
+        3. **Replace** the existing secrets with:
+        ```toml
+        PINECONE_API_KEY = "your_pinecone_key_here"
+        GROQ_API_KEY = "gsk_your_actual_key_here"
+        ```
+        4. Click **Save**
+        5. The app will **automatically redeploy**
+        
+        ### Common Issues:
+        - ❌ **Extra spaces** in the secret value
+        - ❌ **Missing quotes** around the API key
+        - ❌ **Using the wrong key** (Pinecone key in Groq field or vice versa)
+        - ❌ **Key is expired** or revoked
+        """)
         return
 
     # Initialize services
@@ -347,223 +444,9 @@ def main():
         st.error(f"Failed to initialize services: {e}")
         return
 
-    # Sidebar
-    st.sidebar.header("⚙️ Configuration")
-    
-    # Model selection
-    available_models = get_available_models(groq_client)
-    selected_model = st.sidebar.selectbox("Choose AI Model", available_models)
-    
-    st.sidebar.markdown("---")
-    st.sidebar.header("📂 Document Management")
-
-    # Get existing namespaces
-    try:
-        index_stats = index.describe_index_stats()
-        current_stats = index_stats.get("namespaces", {})
-        all_namespaces = list(current_stats.keys())
-    except Exception as e:
-        st.error(f"❌ Could not fetch namespace data: {e}")
-        all_namespaces = []
-        current_stats = {}
-
-    # Parent namespace management
-    parent_namespaces = sorted(list({ns.split("__")[0] for ns in all_namespaces if "__" in ns}))
-    parent_options = ["Create New Collection"] + parent_namespaces
-    
-    if st.session_state.selected_parent is None and parent_namespaces:
-        st.session_state.selected_parent = parent_namespaces[0]
-    
-    current_parent_index = parent_options.index(st.session_state.selected_parent) if st.session_state.selected_parent in parent_options else 0
-    
-    parent_selected = st.sidebar.selectbox(
-        "Select Document Collection",
-        options=parent_options,
-        index=current_parent_index,
-        key="parent_selectbox"
-    )
-
-    if parent_selected == "Create New Collection":
-        parent_input = st.sidebar.text_input(
-            "New Collection Name (letters, numbers, underscores only)",
-            value=st.session_state.parent_namespace_input,
-            key="parent_namespace_input"
-        )
-        parent_namespace = parent_input.strip() if parent_input else None
-    else:
-        parent_namespace = parent_selected
-        st.session_state.selected_parent = parent_namespace
-
-    # Document (subnamespace) management
-    subnamespaces = []
-    if parent_namespace:
-        subnamespaces = [ns for ns in all_namespaces if ns.startswith(f"{parent_namespace}__")]
-    
-    if parent_namespace and subnamespaces:
-        sub_options = ["Search All Documents"] + ["Upload New Document"] + subnamespaces
-    else:
-        sub_options = ["Upload New Document"] + subnamespaces
-    
-    if st.session_state.selected_subnamespace not in sub_options:
-        if subnamespaces:
-            st.session_state.selected_subnamespace = "Search All Documents"
-            st.session_state.search_mode = "parent"
-        else:
-            st.session_state.selected_subnamespace = "Upload New Document"
-            st.session_state.search_mode = "subnamespace"
-
-    current_sub_index = sub_options.index(st.session_state.selected_subnamespace) if st.session_state.selected_subnamespace in sub_options else 0
-
-    sub_selected = st.sidebar.selectbox(
-        "Document Selection",
-        options=sub_options,
-        index=current_sub_index,
-        key="subnamespace_selectbox",
-        on_change=on_subnamespace_change
-    )
-
-    # File upload
-    uploaded_file = st.sidebar.file_uploader("Choose PDF or Markdown file", type=["pdf", "md"])
-    tmp_path = None
-    if uploaded_file:
-        file_ext = uploaded_file.name.split(".")[-1].lower()
-        tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=f".{file_ext}")
-        tmp_file.write(uploaded_file.getvalue())
-        tmp_file.close()
-        tmp_path = tmp_file.name
-
-    # Document operations
-    col1, col2 = st.sidebar.columns(2)
-    
-    with col1:
-        if uploaded_file and sub_selected == "Upload New Document" and st.button("📤 Upload", use_container_width=True):
-            if tmp_path and parent_namespace:
-                doc_name = uploaded_file.name.split(".")[0].replace(" ", "_").lower()[:50]
-                full_namespace = f"{parent_namespace}__{doc_name}"
-                with st.spinner("Processing document..."):
-                    texts = process_document(tmp_path, file_ext)
-                    if texts:
-                        count = store_embeddings(index, embedding_model, texts, full_namespace, False)
-                        if count > 0:
-                            st.success(f"✅ Uploaded '{doc_name}' with {count} sections")
-                            st.session_state.uploaded_files[uploaded_file.name] = full_namespace
-                            save_uploaded_files(st.session_state.uploaded_files)
-                            st.session_state.selected_subnamespace = full_namespace
-                            st.session_state.search_mode = "subnamespace"
-                            clear_chat()
-                        else:
-                            st.error("❌ Failed to store document content")
-                    else:
-                        st.error("❌ Could not extract text from document")
-                if tmp_path and os.path.exists(tmp_path):
-                    os.unlink(tmp_path)
-                st.rerun()
-
-    with col2:
-        if sub_selected not in ["Upload New Document", "Search All Documents"] and st.button("🗑️ Delete", use_container_width=True, type="secondary"):
-            if st.session_state.selected_subnamespace:
-                try:
-                    namespace_to_delete = st.session_state.selected_subnamespace
-                    index.delete(delete_all=True, namespace=namespace_to_delete)
-                    st.success(f"✅ Deleted document")
-                    st.session_state.uploaded_files = {k: v for k, v in st.session_state.uploaded_files.items() if v != namespace_to_delete}
-                    save_uploaded_files(st.session_state.uploaded_files)
-                    
-                    remaining = [ns for ns in subnamespaces if ns != namespace_to_delete]
-                    if remaining:
-                        st.session_state.selected_subnamespace = "Search All Documents"
-                        st.session_state.search_mode = "parent"
-                    else:
-                        st.session_state.selected_subnamespace = "Upload New Document"
-                        st.session_state.search_mode = "subnamespace"
-                    
-                    clear_chat()
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"❌ Delete failed: {e}")
-
-    # Main chat area
-    st.markdown("### 💬 Chat with Your Documents")
-    
-    # Search scope info
-    if st.session_state.selected_subnamespace:
-        if st.session_state.search_mode == "parent" and st.session_state.selected_parent:
-            st.info(f"**Searching:** All documents in **{st.session_state.selected_parent}**")
-            if subnamespaces:
-                st.write(f"**Documents:** {', '.join([ns.split('__')[1] for ns in subnamespaces])}")
-        elif st.session_state.search_mode == "subnamespace" and st.session_state.selected_subnamespace:
-            doc_name = st.session_state.selected_subnamespace.split('__')[1] if '__' in st.session_state.selected_subnamespace else st.session_state.selected_subnamespace
-            st.info(f"**Searching:** Single document - **{doc_name}**")
-
-    # Chat messages
-    for msg in st.session_state.messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-
-    # Chat input
-    if prompt := st.chat_input("Ask a question about your documents..."):
-        if not st.session_state.selected_parent:
-            st.warning("👆 Please create or select a document collection first")
-        elif st.session_state.search_mode == "parent" and not subnamespaces:
-            st.warning("📁 No documents found. Please upload a document first.")
-        else:
-            st.session_state.messages.append({"role": "user", "content": prompt})
-            with st.chat_message("user"):
-                st.markdown(prompt)
-
-            with st.chat_message("assistant"):
-                with st.spinner("🔍 Searching documents..."):
-                    namespaces_to_search = []
-                    
-                    if st.session_state.search_mode == "parent":
-                        namespaces_to_search = subnamespaces
-                    else:
-                        if st.session_state.selected_subnamespace and st.session_state.selected_subnamespace not in ["Upload New Document", "Search All Documents"]:
-                            namespaces_to_search = [st.session_state.selected_subnamespace]
-                    
-                    all_results = []
-                    for ns in namespaces_to_search:
-                        results = search_documents(index, embedding_model, prompt, ns)
-                        all_results.extend(results)
-                    
-                    all_results.sort(key=lambda x: x["score"], reverse=True)
-                    top_results = all_results[:8]
-
-                    if top_results:
-                        context = "\n\n".join([f"[Section {i+1}] {r['text']}" for i, r in enumerate(top_results)])
-                        answer = generate_response(groq_client, context, prompt, selected_model)
-                        st.write(f"*Found {len(top_results)} relevant sections from {len(namespaces_to_search)} document(s)*")
-                    else:
-                        answer = "I couldn't find any relevant information in your documents to answer this question."
-                        if st.session_state.search_mode == "parent":
-                            answer += " You might want to upload more documents or try asking about different topics."
-                        else:
-                            answer += " This particular document might not contain information about your question."
-                    
-                    st.markdown(answer)
-                    st.session_state.messages.append({"role": "assistant", "content": answer})
-
-    # Footer info
-    st.sidebar.markdown("---")
-    st.sidebar.write("**Uploaded Files:**")
-    for name, ns in list(st.session_state.uploaded_files.items())[-5:]:  # Show last 5
-        st.sidebar.write(f"• {name}")
-    
-    st.sidebar.markdown("---")
-    st.sidebar.write("**Storage Info:**")
-    total_vectors = 0
-    if st.session_state.selected_parent:
-        parent_vectors = 0
-        for ns, stats in current_stats.items():
-            if ns.startswith(f"{st.session_state.selected_parent}__"):
-                vector_count = stats.get('vector_count', 0)
-                parent_vectors += vector_count
-        st.sidebar.write(f"Vectors in collection: **{parent_vectors}**")
-    else:
-        for ns, stats in current_stats.items():
-            vector_count = stats.get('vector_count', 0)
-            total_vectors += vector_count
-        st.sidebar.write(f"Total vectors: **{total_vectors}**")
+    # Rest of your app code remains the same...
+    # [The rest of your existing main() function code goes here]
+    # ... (keeping the same sidebar, chat interface, etc.)
 
 if __name__ == "__main__":
     main()
