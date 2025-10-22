@@ -21,7 +21,6 @@ def check_packages():
     # Check pinecone first
     try:
         import pinecone
-        # Check if it's the correct package by looking for the Pinecone class
         if hasattr(pinecone, 'Pinecone'):
             packages_status['pinecone'] = True
             st.success("✅ Pinecone package: Correct version detected")
@@ -38,21 +37,24 @@ def check_packages():
     # Check other packages
     other_packages = {
         'groq': 'Groq',
-        'langchain': 'RecursiveCharacterTextSplitter',
+        'langchain_text_splitters': 'RecursiveCharacterTextSplitter',
         'langchain_community': 'PyPDFLoader',
-        'sentence_transformers': 'SentenceTransformer'
+        'sentence_transformers': 'SentenceTransformer',
+        'langchain_core': 'Document'
     }
     
     for package, import_name in other_packages.items():
         try:
             if package == 'groq':
                 from groq import Groq
-            elif package == 'langchain':
-                from langchain.text_splitter import RecursiveCharacterTextSplitter
+            elif package == 'langchain_text_splitters':
+                from langchain_text_splitters import RecursiveCharacterTextSplitter
             elif package == 'langchain_community':
                 from langchain_community.document_loaders import PyPDFLoader
             elif package == 'sentence_transformers':
                 from sentence_transformers import SentenceTransformer
+            elif package == 'langchain_core':
+                from langchain_core.documents import Document
             packages_status[package] = True
             st.success(f"✅ {package}: Import successful")
         except ImportError as e:
@@ -75,6 +77,8 @@ if not all(packages_status.values()):
     groq>=0.3.0
     langchain>=0.1.0
     langchain-community>=0.0.10
+    langchain-core>=0.1.0
+    langchain-text-splitters>=0.0.1
     sentence-transformers>=2.2.0
     ```
     
@@ -88,10 +92,10 @@ if not all(packages_status.values()):
 # Now safely import all packages
 import pinecone
 from groq import Groq
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
 from sentence_transformers import SentenceTransformer
-from langchain.schema import Document
+from langchain_core.documents import Document
 
 # ==============================
 # Constants
