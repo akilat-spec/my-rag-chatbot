@@ -19,11 +19,11 @@ try:
     if hasattr(pinecone, 'Pinecone'):
         st.success("✅ Correct Pinecone package detected")
     else:
-        st.error("❌ Wrong Pinecone package. Please install 'pinecone' not 'pinecone-client'")
+        st.error("❌ Wrong Pinecone package. Please install 'pinecone-client' not 'pinecone-client'")
         st.stop()
 except ImportError as e:
     st.error(f"❌ Pinecone import error: {e}")
-    st.info("Please install with: pip install pinecone")
+    st.info("Please install with: pip install pinecone-client")
     st.stop()
 
 try:
@@ -61,10 +61,15 @@ def get_available_models(groq_client):
         return CHAT_MODELS
 
 def check_environment():
-    pinecone_key = os.getenv("PINECONE_API_KEY") or st.secrets.get("PINECONE_API_KEY")
-    groq_key = os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY")
-    if not pinecone_key or not groq_key:
-        st.error("❌ Missing Pinecone or Groq API key")
+    # For Streamlit Cloud, use st.secrets
+    pinecone_key = st.secrets.get("PINECONE_API_KEY")
+    groq_key = st.secrets.get("GROQ_API_KEY")
+    
+    if not pinecone_key:
+        st.error("❌ Missing Pinecone API key in secrets")
+        return None, None
+    if not groq_key:
+        st.error("❌ Missing Groq API key in secrets")
         return None, None
     return pinecone_key, groq_key
 
@@ -87,7 +92,17 @@ def get_pinecone_index(pc):
             metric="cosine",
             spec=pinecone.ServerlessSpec(cloud="aws", region="us-east-1")
         )
-        time.sleep(10)
+        # Wait for index to be ready
+        for i in range(30):
+            try:
+                index = pc.Index(index_name)
+                index.describe_index_stats()
+                break
+            except Exception:
+                if i == 29:
+                    st.error("❌ Timeout waiting for index to be ready")
+                    st.stop()
+                time.sleep(1)
     return pc.Index(index_name)
 
 def process_document(file_path, file_type):
@@ -110,7 +125,13 @@ def store_embeddings(index, model, texts, namespace, update_existing=False):
             pass
     embeddings = model.encode(texts).tolist()
     vectors = [{"id": f"doc_{uuid.uuid4().hex[:8]}", "values": emb, "metadata": {"text": t}} for emb, t in zip(embeddings, texts)]
-    index.upsert(vectors=vectors, namespace=namespace)
+    
+    # Upsert in batches to avoid payload size limits
+    batch_size = 100
+    for i in range(0, len(vectors), batch_size):
+        batch = vectors[i:i + batch_size]
+        index.upsert(vectors=batch, namespace=namespace)
+    
     return len(vectors)
 
 def search_documents(index, model, query, namespace):
@@ -119,23 +140,40 @@ def search_documents(index, model, query, namespace):
     return [{"text": m.metadata.get("text", ""), "score": m.score} for m in res.matches if m.score > 0.3]
 
 def generate_response(client, context, question, model):
-    prompt = f"Context:\n{context}\n\nQuestion: {question}\nAnswer:"
+    prompt = f"""Based on the following context, please answer the question. If the context doesn't contain relevant information, say so.
+
+Context:
+{context}
+
+Question: {question}
+
+Answer:"""
+    
     resp = client.chat.completions.create(
         model=model,
-        messages=[{"role": "system", "content": "You are a helpful assistant."},
-                  {"role": "user", "content": prompt}],
-        max_tokens=500
+        messages=[
+            {"role": "system", "content": "You are a helpful assistant that answers questions based on the provided context."},
+            {"role": "user", "content": prompt}
+        ],
+        max_tokens=500,
+        temperature=0.1
     )
     return resp.choices[0].message.content
 
 def save_uploaded_files(data):
-    with open(UPLOADED_FILES_JSON, "w") as f:
-        json.dump(data, f, indent=4)
+    try:
+        with open(UPLOADED_FILES_JSON, "w") as f:
+            json.dump(data, f, indent=4)
+    except Exception as e:
+        st.error(f"Error saving uploaded files: {e}")
 
 def load_uploaded_files():
-    if os.path.exists(UPLOADED_FILES_JSON):
-        with open(UPLOADED_FILES_JSON) as f:
-            return json.load(f)
+    try:
+        if os.path.exists(UPLOADED_FILES_JSON):
+            with open(UPLOADED_FILES_JSON) as f:
+                return json.load(f)
+    except Exception:
+        return {}
     return {}
 
 def clear_chat():
@@ -157,7 +195,7 @@ def on_subnamespace_change():
 # Main App
 # ==============================
 def main():
-    st.title("📚 Multi-Level Namespace Chatbot")
+    st.title("📚 RAG Chatbot with Pinecone")
 
     # Initialize session_state
     if "messages" not in st.session_state:
@@ -176,16 +214,22 @@ def main():
         st.session_state.search_mode = "subnamespace"
 
     if not PACKAGES_AVAILABLE:
-        st.error("Missing required packages.")
+        st.error("Missing required packages. Please check the requirements.")
         return
 
+    # Check environment and initialize clients
     pinecone_key, groq_key = check_environment()
     if not pinecone_key or not groq_key:
         return
 
-    embedding_model = load_embedding_model()
-    pc, groq_client = initialize_clients(pinecone_key, groq_key)
-    index = get_pinecone_index(pc)
+    # Initialize components
+    try:
+        embedding_model = load_embedding_model()
+        pc, groq_client = initialize_clients(pinecone_key, groq_key)
+        index = get_pinecone_index(pc)
+    except Exception as e:
+        st.error(f"❌ Error initializing services: {e}")
+        return
 
     # ---------------- Sidebar ----------------
     st.sidebar.header("⚙️ Settings")
@@ -193,11 +237,15 @@ def main():
     selected_model = st.sidebar.selectbox("Select Groq Model", available_models)
 
     st.sidebar.markdown("---")
-    st.sidebar.header("📂 Namespace Management")
+    st.sidebar.header("📂 Document Management")
 
     # Get all namespaces
-    current_stats = index.describe_index_stats().get("namespaces", {})
-    all_namespaces = list(current_stats.keys())
+    try:
+        current_stats = index.describe_index_stats().get("namespaces", {})
+        all_namespaces = list(current_stats.keys())
+    except Exception as e:
+        st.error(f"❌ Error getting namespace stats: {e}")
+        all_namespaces = []
 
     # Parent namespaces
     parent_namespaces = sorted(list({ns.split("__")[0] for ns in all_namespaces if "__" in ns}))
@@ -233,7 +281,7 @@ def main():
         parent_namespace = parent_selected
         st.session_state.selected_parent = parent_namespace
 
-    # Subnamespace handling with proper persistence
+    # Subnamespace handling
     subnamespaces = []
     if parent_namespace:
         subnamespaces = [ns for ns in all_namespaces if ns.startswith(f"{parent_namespace}__")]
@@ -245,14 +293,11 @@ def main():
         sub_options = ["Create New Subnamespace"] + subnamespaces
     
     # Handle subnamespace selection persistence
-    # If current selection is not in options, find the best alternative
     if st.session_state.selected_subnamespace not in sub_options:
         if subnamespaces:
-            # If we have subnamespaces, default to search all
             st.session_state.selected_subnamespace = "Search All Documents in Parent"
             st.session_state.search_mode = "parent"
         else:
-            # If no subnamespaces, default to create new
             st.session_state.selected_subnamespace = "Create New Subnamespace"
             st.session_state.search_mode = "subnamespace"
 
@@ -272,7 +317,7 @@ def main():
 
     # File uploader
     uploaded_file = st.sidebar.file_uploader("Upload PDF/Markdown", type=["pdf", "md"], key="file_uploader")
-    tmp_path, file_ext = None, None
+    tmp_path = None
     if uploaded_file:
         file_ext = uploaded_file.name.split(".")[-1].lower()
         tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=f".{file_ext}")
@@ -281,44 +326,52 @@ def main():
         tmp_path = tmp_file.name
 
     # Upload new subnamespace
-    if uploaded_file and sub_selected == "Create New Subnamespace" and st.sidebar.button("📤 Upload as New Subnamespace"):
+    if uploaded_file and sub_selected == "Create New Subnamespace" and st.sidebar.button("📤 Upload as New Document"):
         if tmp_path and parent_namespace:
             subname = uploaded_file.name.split(".")[0].replace(" ", "_").lower()
             full_namespace = f"{parent_namespace}__{subname}"
-            texts = process_document(tmp_path, file_ext)
-            count = store_embeddings(index, embedding_model, texts, full_namespace, update_existing=False)
-            st.success(f"✅ Created subnamespace '{full_namespace}' with {count} chunks.")
-            st.session_state.uploaded_files[uploaded_file.name] = full_namespace
-            save_uploaded_files(st.session_state.uploaded_files)
-            
-            # Update selection to the newly created namespace
-            st.session_state.selected_subnamespace = full_namespace
-            st.session_state.search_mode = "subnamespace"
-            st.session_state.subnamespace_created = True
-            clear_chat()
+            with st.spinner("Processing document..."):
+                texts = process_document(tmp_path, file_ext)
+                if texts:
+                    count = store_embeddings(index, embedding_model, texts, full_namespace, update_existing=False)
+                    st.success(f"✅ Created document '{full_namespace}' with {count} chunks.")
+                    st.session_state.uploaded_files[uploaded_file.name] = full_namespace
+                    save_uploaded_files(st.session_state.uploaded_files)
+                    
+                    # Update selection to the newly created namespace
+                    st.session_state.selected_subnamespace = full_namespace
+                    st.session_state.search_mode = "subnamespace"
+                    st.session_state.subnamespace_created = True
+                    clear_chat()
+                else:
+                    st.error("❌ No text could be extracted from the document")
             os.unlink(tmp_path)
             st.rerun()
 
     # Update existing subnamespace
-    if uploaded_file and sub_selected not in ["Create New Subnamespace", "Search All Documents in Parent"] and st.sidebar.button("🔄 Update Selected Subnamespace"):
+    if uploaded_file and sub_selected not in ["Create New Subnamespace", "Search All Documents in Parent"] and st.sidebar.button("🔄 Update Selected Document"):
         if tmp_path and st.session_state.selected_subnamespace:
-            texts = process_document(tmp_path, file_ext)
-            full_namespace = st.session_state.selected_subnamespace
-            count = store_embeddings(index, embedding_model, texts, full_namespace, update_existing=True)
-            st.success(f"✅ Updated '{full_namespace}' with {count} chunks.")
-            st.session_state.uploaded_files[uploaded_file.name] = full_namespace
-            save_uploaded_files(st.session_state.uploaded_files)
-            clear_chat()
+            with st.spinner("Updating document..."):
+                texts = process_document(tmp_path, file_ext)
+                if texts:
+                    full_namespace = st.session_state.selected_subnamespace
+                    count = store_embeddings(index, embedding_model, texts, full_namespace, update_existing=True)
+                    st.success(f"✅ Updated '{full_namespace}' with {count} chunks.")
+                    st.session_state.uploaded_files[uploaded_file.name] = full_namespace
+                    save_uploaded_files(st.session_state.uploaded_files)
+                    clear_chat()
+                else:
+                    st.error("❌ No text could be extracted from the document")
             os.unlink(tmp_path)
             st.rerun()
 
     # Delete subnamespace
-    if sub_selected not in ["Create New Subnamespace", "Search All Documents in Parent"] and st.sidebar.button("🗑️ Delete Selected Subnamespace", type="secondary"):
+    if sub_selected not in ["Create New Subnamespace", "Search All Documents in Parent"] and st.sidebar.button("🗑️ Delete Selected Document", type="secondary"):
         if st.session_state.selected_subnamespace:
             try:
                 namespace_to_delete = st.session_state.selected_subnamespace
                 index.delete(delete_all=True, namespace=namespace_to_delete)
-                st.success(f"✅ Deleted subnamespace '{namespace_to_delete}'")
+                st.success(f"✅ Deleted document '{namespace_to_delete}'")
                 # Update the uploaded files record
                 st.session_state.uploaded_files = {k: v for k, v in st.session_state.uploaded_files.items() 
                                                  if v != namespace_to_delete}
@@ -336,55 +389,46 @@ def main():
                 clear_chat()
                 st.rerun()
             except Exception as e:
-                st.error(f"❌ Error deleting subnamespace: {e}")
+                st.error(f"❌ Error deleting document: {e}")
 
     # ---------------- Chat Area ----------------
-    st.markdown("### 💬 Chat with your document")
+    st.markdown("### 💬 Chat with your documents")
     
     # Display current search scope info
     if st.session_state.selected_subnamespace:
         if st.session_state.search_mode == "parent" and st.session_state.selected_parent:
-            st.info(f"**Search Scope:** 🔍 All documents in parent namespace `{st.session_state.selected_parent}`")
+            st.info(f"**Search Scope:** 🔍 All documents in `{st.session_state.selected_parent}`")
             if subnamespaces:
-                st.write(f"**Included subnamespaces:** {', '.join([ns.split('__')[1] for ns in subnamespaces])}")
+                st.write(f"**Included documents:** {', '.join([ns.split('__')[1] for ns in subnamespaces])}")
         elif st.session_state.search_mode == "subnamespace" and st.session_state.selected_subnamespace:
             st.info(f"**Search Scope:** 📄 Single document `{st.session_state.selected_subnamespace}`")
     
-    # Debug information (can be removed in production)
-    with st.expander("Debug Info"):
-        st.write(f"Selected Subnamespace: {st.session_state.selected_subnamespace}")
-        st.write(f"Search Mode: {st.session_state.search_mode}")
-        st.write(f"Available Subnamespaces: {subnamespaces}")
-        st.write(f"Sub Options: {sub_options}")
-    
+    # Display chat messages
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    if prompt := st.chat_input("Ask a question..."):
+    # Chat input
+    if prompt := st.chat_input("Ask a question about your documents..."):
         if not st.session_state.selected_parent:
             st.warning("⚠️ Please select or create a parent namespace first.")
         elif st.session_state.search_mode == "parent" and not subnamespaces:
-            st.warning("⚠️ No documents found in this parent namespace. Please upload a document first.")
+            st.warning("⚠️ No documents found. Please upload a document first.")
         else:
             st.session_state.messages.append({"role": "user", "content": prompt})
             with st.chat_message("user"):
                 st.markdown(prompt)
 
             with st.chat_message("assistant"):
-                with st.spinner("🔍 Searching..."):
+                with st.spinner("🔍 Searching documents..."):
                     # Determine which namespaces to search based on search mode
                     namespaces_to_search = []
                     
                     if st.session_state.search_mode == "parent":
-                        # Search all subnamespaces under the parent
                         namespaces_to_search = subnamespaces
-                        st.info(f"🔍 Searching across {len(namespaces_to_search)} documents...")
                     else:
-                        # Search only the selected subnamespace
                         if st.session_state.selected_subnamespace and st.session_state.selected_subnamespace not in ["Create New Subnamespace", "Search All Documents in Parent"]:
                             namespaces_to_search = [st.session_state.selected_subnamespace]
-                            st.info(f"🔍 Searching in single document...")
                     
                     all_results = []
                     for ns in namespaces_to_search:
@@ -393,33 +437,31 @@ def main():
                     
                     # Sort by score and take top results
                     all_results.sort(key=lambda x: x["score"], reverse=True)
-                    top_results = all_results[:10]  # Limit to top 10 results
+                    top_results = all_results[:10]
 
                     if top_results:
-                        context = "\n\n".join([f"[Score: {r['score']:.3f}] {r['text']}" for r in top_results])
+                        context = "\n\n".join([f"[Relevance: {r['score']:.3f}] {r['text']}" for r in top_results])
                         answer = generate_response(groq_client, context, prompt, selected_model)
-                        
-                        # Display search results summary
-                        st.write(f"**Found {len(top_results)} relevant chunks from {len(namespaces_to_search)} namespace(s)**")
+                        st.write(f"**Found {len(top_results)} relevant sections from {len(namespaces_to_search)} document(s)**")
                     else:
-                        answer = "No relevant information found in the selected namespace(s)."
+                        answer = "No relevant information found in your documents."
                         if st.session_state.search_mode == "parent":
-                            answer += " Try searching in a specific document or check if your documents contain relevant information."
+                            answer += " Try searching in a specific document or upload more relevant documents."
                         else:
-                            answer += " The document might not contain information related to your question."
+                            answer += " This document might not contain information related to your question."
                     
                     st.markdown(answer)
                     st.session_state.messages.append({"role": "assistant", "content": answer})
 
     # Sidebar - uploaded files and namespace info
     st.sidebar.markdown("---")
-    st.sidebar.write("**Uploaded Files & Namespaces:**")
+    st.sidebar.write("**Uploaded Files:**")
     for name, ns in st.session_state.uploaded_files.items():
         st.sidebar.write(f"- {name} → `{ns}`")
     
     # Namespace statistics
     st.sidebar.markdown("---")
-    st.sidebar.write("**Namespace Statistics:**")
+    st.sidebar.write("**Storage Statistics:**")
     total_vectors = 0
     if st.session_state.selected_parent:
         parent_vectors = 0
